@@ -14,6 +14,7 @@ combinations of tags and pieces of the name.
 
 
 ## Coming features
+- Create a config file if there is none
 - More infos in the DB for every document like timestamp and filetype
 - Delete documents (From DB and drom filesystem)
 - Edit DB entrys (Change Name, change timestamp)
