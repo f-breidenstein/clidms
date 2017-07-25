@@ -3,9 +3,11 @@ import os
 import sys
 import logging
 import click
+import subprocess
 from sqlalchemy import *
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, sessionmaker
+from sqlalchemy.engine.reflection import Inspector
 import texttable as tt
 
 
@@ -19,6 +21,7 @@ association_table = Table('association', Base.metadata,
 class Document(Base):
     __tablename__ = "Document"
     id = Column(Integer, primary_key=True)
+    name = Column(String(250), nullable=False)
     filename = Column(String(250), nullable=False)
     tags = relationship("Tag",
                     secondary=association_table)
@@ -65,24 +68,37 @@ def clidms():
 @clidms.command("index")
 @click.option("-r", "--recursive", help="Scan the DOCUMENT_PATH dir recursively", default=False, is_flag=True)
 def index_documents(recursive):
-    try:
-        session.query(Document).one()
-    except:
-        print("There is no database. Creating a new one")
+    inspector = Inspector.from_engine(engine)
+    if not "Document" in inspector.get_table_names():
+        logging.warning('There is no database in the data folder. Creating a new one for you')
         create_db()
 
+    try:
+        files = os.listdir(config.DOCUMENT_PATH)
+    except FileNotFoundError:
+        logging.critical("Document folder does not exist ({})".format(config.DOCUMENT_PATH))
+        exit(1)
 
-    files = os.listdir(config.DOCUMENT_PATH)
     supported_files = [f for f in files if f.split(".")[-1] in config.SUPPORTED_FILETYPES]
-    print("Found {} files to index".format(len(supported_files)))
+    print("Found {} files".format(len(supported_files)))
+    new_files = 0
+
     for f in  supported_files:
-        new_doc = Document(filename=f)
-        session.add(new_doc)
+        if not session.query(Document).filter_by(filename=f).all():
+            new_doc = Document(filename=f, name=f)
+            session.add(new_doc)
+            new_files = new_files + 1
+
     session.commit()
+    print("Indexed {} new files.".format(new_files))
 
 @clidms.command("list")
-def list_documents():
-    print_table(session.query(Document).all())
+@click.option("-l", "--limit", help="Limit the amount of results to show", default=10)
+def list_documents(limit):
+    if limit == 0:
+        print_table(session.query(Document).all())
+    else:
+        print_table(session.query(Document).limit(limit))
 
 
 def print_table(documents):
@@ -101,36 +117,50 @@ def print_table(documents):
 
 
 def create_db():
+    print("creating")
     Base.metadata.create_all(engine)
+    print("done")
 
 def add_tag(tagname):
     new_tag = Tag(value=tagname)
     session.add(new_tag)
     session.commit()
-    print("Tag '{}' added".format(tagname))
+
+@clidms.command("open")
+@click.argument("document_id")
+def open_file(document_id):
+    document = session.query(Document).filter_by(id=document_id).one()
+    filepath = os.path.join(config.DOCUMENT_PATH, document.filename)
+    print("Opening '{}'".format(filepath))
+    subprocess.call(["xdg-open", filepath])
+
+
 
 @clidms.command("tag")
-@click.argument("document_id")
+@click.argument("documents")
 @click.argument("tags")
-def add_tag(document_id, tags):
+def add_tag(documents, tags):
+    documents = documents.split(",")
     tags = tags.split(",")
-    try:
-        document = session.query(Document).filter_by(id=document_id).one()
-    except:
-        print("No docment with this ID!")
-        return
 
-    for tag_value in tags:
+    for document_id in documents:
         try:
-            tag = session.query(Tag).filter_by(value=tag_value).one()
+            document = session.query(Document).filter_by(id=document_id).one()
         except:
-            tag = Tag(value=tag_value)
-            session.add(tag)
-            session.commit()
+            logging.critical("No docment with this ID!")
+            continue
 
-        document.tags.append(tag)
-        print("Added '{}' to '{}'".format(tag_value, document.filename))
-        session.commit()
+        for tag_value in tags:
+            try:
+                tag = session.query(Tag).filter_by(value=tag_value).one()
+            except:
+                tag = Tag(value=tag_value)
+                session.add(tag)
+                session.commit()
+
+            document.tags.append(tag)
+            print("Added '{}' to '{}'".format(tag_value, document.filename))
+            session.commit()
 
 @clidms.command("find")
 @click.option('--tag', '-t')
@@ -143,8 +173,10 @@ def find(tag, name):
         query = query.filter(Document.tags.any(Tag.value.in_([tag])))
     
     results = query.all()
-    print_table(results)
-    
+    if len(results) == 0:
+        print("No documents matched your search")
+    else:
+        print_table(results)
 
 
 if __name__ == '__main__':
